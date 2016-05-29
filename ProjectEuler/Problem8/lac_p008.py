@@ -5,12 +5,12 @@ s =  "73167176531330624919225119674426574742355349194934969835203127745063262395
 
 last = 0
 for i in range(987):
-  aux = s[i:13+i]
-  prod = 1
-  for j in range(13):
-    prod = prod*int(aux[j]) 
-  if prod > last:
-    last = prod
+    aux = s[i:13+i]
+    prod = 1
+    for j in range(13):
+        prod = prod*int(aux[j]) 
+    if prod > last:
+        last = prod
 
 print last
 print ("This program takes %f s" % (time.time()-t))
