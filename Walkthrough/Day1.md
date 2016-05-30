@@ -42,12 +42,12 @@ https://github.com/dgasmith/CDSG_SoC_2016/pull/4/files#r64968279
 
 In general we want to stick with the Pep8 style of Python coding (https://www.python.org/dev/peps/pep-0008/). The largest point I would like to make with this style for now is that we want to use exactly four spaces for indentation and _not_ tabs. To help you out you can add/set your “~/.vimrc” file to contain the following:
 
-"""
+```
 :syntax on
 set tabstop=4
 set shiftwidth=4
 set expand tab
-"""
+```
 
 This notation will effectively expand a tab user input to four spaces making this part of the pep easy to accomplish. You can also run “pep8 file.py” if you installed conda to see how good or bad your code is adhering to this notation.
 
