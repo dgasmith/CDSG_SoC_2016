@@ -20,5 +20,5 @@ while (count < 10001 ):
 
 
 print("The 10001st  prime number is %d" % test)
-print("Total time took %6.3f" % (time.time() - start))
+print("Runtime: %6.3f" % (time.time() - start))
 

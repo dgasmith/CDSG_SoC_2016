@@ -1,4 +1,4 @@
-print ("Problem 20")
+print ("Problem 20: High-Precision is great!")
 
 import time
 
@@ -15,5 +15,5 @@ while(n > 0):
     n /= 10
 
 
-print s
+print ("Answer: %d" % s)
 print ("Process took %6.6f seconds" % (time.time() - start))

@@ -1,4 +1,4 @@
-print ("Problem 16")
+print ("Problem 16: High precision is great!")
 import time
 start = time.time()
 
@@ -11,4 +11,3 @@ while b > 0:
 
 print ("Answer: %d" % s)
 print ("That took %6.6f seconds" % (time.time() - start)) 
-
