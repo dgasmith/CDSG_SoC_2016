@@ -1,0 +1,18 @@
+Done entirely by hand.
+
+In order for each integer in [1, 20] to divide an integer x evenly, they must all
+be able to be constructed via the prime factors of x.  Start by factoring 2520, since
+each [1, 10] divide it:
+
+2520 = 2^3 * 3^2 * 5 * 7
+
+So, lets go through the integers in [11, 20] and ``add'' their prime factors into the
+above product.  Obviously, we just need to have all the primes in this set accounted for,
+so
+
+2^3 * 3^2 * 5 * 7 * 11 * 13 * 17 * 19
+
+Now, checking the remaining integers, everything will divide evenly _except_ 16
+since 16 = 2^4 but we only have 2^3 in the above.  Thus we must have that
+
+x = 2^4 * 3^2 * 5 * 7 * 11 * 13 * 17 * 19 = 232792560
