@@ -16,4 +16,4 @@ while(n > 0):
 
 
 print ("Answer: %d" % s)
-print ("Process took %6.6f seconds" % (time.time() - start))
+print ("Runtime: %6.6f" % (time.time() - start))
