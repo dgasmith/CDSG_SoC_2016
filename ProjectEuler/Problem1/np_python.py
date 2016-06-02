@@ -1,7 +1,7 @@
 import time
 import numpy as np
 
-max_value = int(1e6)
+max_value = int(1e8)
 
 arr = np.arange(max_value)
 t = time.time()

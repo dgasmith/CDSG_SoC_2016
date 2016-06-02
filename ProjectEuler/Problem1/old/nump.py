@@ -1,6 +1,6 @@
 import time
 
-max_value = int(5e5)
+max_value = int(1e7)
 
 t = time.time()
 result = 0
