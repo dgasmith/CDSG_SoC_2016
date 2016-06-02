@@ -1,0 +1,95 @@
+import numpy as np
+
+molecule mol {
+    He
+#    H 1 0.74
+symmetry c1
+}
+
+wfn = psi4.new_wavefunction(mol, '6-31G')
+set basis 6-31G
+
+mints = psi4.MintsHelper(wfn.basisset())
+
+#print mints.ao_overlap().__array_interface__
+S = np.asarray(mints.ao_overlap())
+T = np.asarray(mints.ao_kinetic())
+V = np.asarray(mints.ao_potential())
+H = T + V
+
+eigval, eigvec = np.linalg.eigh(S)
+
+Shalf_eigvals = eigval ** (-0.5)
+
+#print np.einsum('pi,ij,jq', eigvec, S, eigvec)
+#print np.dot(eigvec, S).dot(eigvec.T)
+
+#print S
+A = np.einsum('ip,p,pj', eigvec, Shalf_eigvals, eigvec)
+#print np.dot(S, A).dot(A)
+
+#print A
+#Amat = mints.ao_overlap()
+#Amat.power(-0.5, 1e-12)
+#print np.array(Amat)
+
+#print eigval
+#print eigvec
+
+Fp = np.dot(A.T, H).dot(A)
+eigvals, C2 = np.linalg.eigh(Fp)
+C = np.dot(A, C2)
+
+Cocc = C[:, :2]
+D = np.dot(Cocc, Cocc.T)
+#D = np.einsum('ik,jk->ij', Cocc, Cocc)
+
+
+nbf = S.shape[0]
+
+g_size = (nbf ** 4) * 8 / 1.e9
+if g_size > 1:
+    raise Exception("G tensor is too big!")
+
+g = np.asarray(mints.ao_eri())
+
+J = 2 * np.einsum('pqrs,rs->pq', g, D)
+K =     np.einsum('prqs,rs->pq', g, D)
+
+F = H + J - K
+
+Eelec = np.einsum('pq,pq->', H + F, D)
+Enuc = mol.nuclear_repulsion_energy()
+
+Eold = 0
+dRMS = 0
+for SCF_ITER in range(10):
+
+    J = 2 * np.einsum('pqrs,rs->pq', g, D)
+    K =     np.einsum('prqs,rs->pq', g, D)
+    F = H + J - K
+
+    Eelec = np.einsum('pq,pq->', H + F, D)
+    Enuc = mol.nuclear_repulsion_energy()
+    SCF_E = Eelec + Enuc
+
+#    print('SCF Iteration %3d: Energy = %4.16f   dE = % 1.5E   dRMS = %1.5E'
+#          % (SCF_ITER, SCF_E, (SCF_E - Eold), dRMS))
+    print('SCF Iteration %3d: Energy = %4.16f'
+          % (SCF_ITER, SCF_E))
+
+    Fp = np.dot(A.T, F).dot(A)
+    evals, C2 = np.linalg.eigh(Fp)
+    C = np.dot(A, C2)
+
+    Cocc = C[:, :1]
+    D = np.dot(Cocc, Cocc.T)
+
+    
+
+print('Electronic energy is   % 12.10f' % Eelec)
+print('Nuclear energy is      % 12.10f' % Enuc)
+print('Total energy is        % 12.10f' % (Eelec + Enuc))
+
+set scf_type pk
+print('Total energy from psi4 % 12.10f' % energy('SCF'))
