@@ -10,4 +10,4 @@ while b > 0:
     b /= 10
 
 print ("Answer: %d" % s)
-print ("That took %6.6f seconds" % (time.time() - start)) 
+print ("Runtime: %6.6f" % (time.time() - start)) 
