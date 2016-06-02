@@ -1,7 +1,7 @@
 print "Problem 18: Maximum Path Sum: Bottom-Up Approach"
 import time
 start = time.time()
-f = open('path.txt')
+f = open('matt_path.txt')
 
 i = 0
 arr = []
