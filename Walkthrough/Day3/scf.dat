@@ -6,29 +6,38 @@ molecule mol {
 symmetry c1
 }
 
+# Build a wavefunction
 wfn = psi4.new_wavefunction(mol, '6-31G')
 set basis 6-31G
 
+# Build a integral helper object
 mints = psi4.MintsHelper(wfn.basisset())
 
+# Construct integrals
 #print mints.ao_overlap().__array_interface__
 S = np.asarray(mints.ao_overlap())
 T = np.asarray(mints.ao_kinetic())
 V = np.asarray(mints.ao_potential())
+
+# Core Hamiltonian
 H = T + V
 
+
+# Form S^-1/2 matrix
 eigval, eigvec = np.linalg.eigh(S)
 
 Shalf_eigvals = eigval ** (-0.5)
 
-#print np.einsum('pi,ij,jq', eigvec, S, eigvec)
-#print np.dot(eigvec, S).dot(eigvec.T)
+# Convert between a diagonal basis and back
+# print np.einsum('pi,ij,jq', eigvec, S, eigvec)
+# print np.dot(eigvec, S).dot(eigvec.T)
 
-#print S
+# Two ways to form S^-12
 A = np.einsum('ip,p,pj', eigvec, Shalf_eigvals, eigvec)
 #print np.dot(S, A).dot(A)
 
-#print A
+
+# Psi4 form
 #Amat = mints.ao_overlap()
 #Amat.power(-0.5, 1e-12)
 #print np.array(Amat)
@@ -36,53 +45,54 @@ A = np.einsum('ip,p,pj', eigvec, Shalf_eigvals, eigvec)
 #print eigval
 #print eigvec
 
+# Construct orbitals from
 Fp = np.dot(A.T, H).dot(A)
 eigvals, C2 = np.linalg.eigh(Fp)
 C = np.dot(A, C2)
 
-Cocc = C[:, :2]
+# How many occupied orbitals do we have?
+ndocc = wfn.nalpha()
+
+# Construct the density
+Cocc = C[:, :ndocc]
 D = np.dot(Cocc, Cocc.T)
 #D = np.einsum('ik,jk->ij', Cocc, Cocc)
 
-
+# Make sure we do not the ERI is not too large
 nbf = S.shape[0]
-
 g_size = (nbf ** 4) * 8 / 1.e9
 if g_size > 1:
     raise Exception("G tensor is too big!")
 
 g = np.asarray(mints.ao_eri())
 
-J = 2 * np.einsum('pqrs,rs->pq', g, D)
-K =     np.einsum('prqs,rs->pq', g, D)
-
-F = H + J - K
-
-Eelec = np.einsum('pq,pq->', H + F, D)
+# Nuclear repulsion energy
 Enuc = mol.nuclear_repulsion_energy()
 
 Eold = 0
 dRMS = 0
 for SCF_ITER in range(10):
 
+    # Construct Fock matrix
     J = 2 * np.einsum('pqrs,rs->pq', g, D)
     K =     np.einsum('prqs,rs->pq', g, D)
     F = H + J - K
 
+    # Compute energy
     Eelec = np.einsum('pq,pq->', H + F, D)
     Enuc = mol.nuclear_repulsion_energy()
     SCF_E = Eelec + Enuc
 
-#    print('SCF Iteration %3d: Energy = %4.16f   dE = % 1.5E   dRMS = %1.5E'
-#          % (SCF_ITER, SCF_E, (SCF_E - Eold), dRMS))
+    # Print the iteration
     print('SCF Iteration %3d: Energy = %4.16f'
           % (SCF_ITER, SCF_E))
 
+    # Diagonalize new Fock matrix
     Fp = np.dot(A.T, F).dot(A)
     evals, C2 = np.linalg.eigh(Fp)
     C = np.dot(A, C2)
 
-    Cocc = C[:, :1]
+    Cocc = C[:, :ndocc]
     D = np.dot(Cocc, Cocc.T)
 
     
