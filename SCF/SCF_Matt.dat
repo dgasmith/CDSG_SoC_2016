@@ -1,0 +1,123 @@
+#SCF Implementation with DIIS using Psi4 molecule, MintsHelper, and wfn.
+import numpy as num
+import time 
+print "SCF Implementation with DIIS\n"
+
+molecule mol {
+    O
+    H 1 1.1
+    H 1 1.1 2 104
+    symmetry c1
+}
+
+start = time.time()
+
+# Create wavefunction using basis set 6-31G.
+wfn = psi4.new_wavefunction(mol, '6-31G')
+#set parameters for psi4, to check answer later.
+set {
+basis aug-cc-pVDZ
+scf_type pk
+e_convergence 1e-8
+}
+
+#The MintsHelper object places molecular integrals (and later derivative integrals) on disk.
+M = psi4.MintsHelper(wfn.basisset())
+#Access orbital overlaps, store in matrix S.
+S = num.asarray(M.ao_overlap())
+#Access kinetic energies, store in matrix T
+T = num.asarray(M.ao_kinetic())
+#Access coloumbic energies, store in matrix V
+V = num.asarray(M.ao_potential())
+#Store Hamiltonian.
+H = T + V
+
+#A = S^(1/2)
+eigval, eigvec = num.linalg.eigh(S)
+eigval **= -0.5
+A = num.dot(eigvec*eigval,eigvec.T)
+
+#Size check for two-electron integrals
+orbs = S.shape[0]
+#Gb of data for two-electron integrals
+size = (orbs**4)*8/1.e9
+ndocc = wfn.nalpha()
+if size > 1:
+    raise Exception("G tensor is too big!")
+
+g = num.asarray(M.ao_eri())
+
+#Diagonalize F and Produce Density Matrix
+Fp = num.dot(A.T,H).dot(A)
+eigval, eigvec = num.linalg.eigh(Fp)
+C = np.dot(A,eigvec) 
+Cocc = C[:,:ndocc]
+D = np.dot(Cocc,Cocc.T)
+
+#Apply variational method which knows when to stop.
+SCFE = 0
+SCFE_old = 1
+count = 0
+
+#Initiate set of trial vectors, error vectors.
+trials = []
+errors = []
+
+while abs(SCFE - SCFE_old)> 1e-8:
+
+    if count > 99:
+        raise Exception("Calculation Exceeds 100 Iterations")
+
+    #Construct Fock Matrix and append to trials
+    J = 2*num.einsum('pqrs,rs->pq',g,D)
+    K =   num.einsum('prqs,rs->pq',g,D)
+    F = H + J - K
+    trials.append(F)
+
+    #Obtain DIIS error
+    r = num.dot(A.T,(num.dot(F,D).dot(S)-num.dot(S,D).dot(F))).dot(A)    
+    errors.append(r)    
+
+    #Build B
+    size = len(errors)+1
+    B = num.zeros((size,size))
+    B[-1] = -1
+    B[:,-1] = -1
+    B[-1,-1] = 0
+    for i in range(size-1):
+        for j in range(size-1):
+                B[i,j] = sum(sum(errors[i]*errors[j]))
+    
+    #Solve for Cn
+    vec = num.zeros(size)
+    vec[-1] = -1
+    inverse = num.linalg.inv(B)
+    Cn = num.dot(inverse,vec)
+        
+    #Rebuild Fock Matrix according to Cn
+    Fdiis = num.zeros_like(F)
+    for i in range(len(Cn)-1):
+        Fdiis += Cn[i]*trials[i]
+
+    #Diagonalize F and Reproduce Density Matrix
+    Fp = num.dot(A.T,Fdiis).dot(A)
+    eigval, eigvec = num.linalg.eigh(Fp)
+    C = np.dot(A,eigvec)
+    Cocc = C[:,:ndocc]
+    D = np.dot(Cocc,Cocc.T)
+
+    #Compute Energy
+    Eelec = num.einsum('qr,qr->',F + H,D)
+    Enuc = mol.nuclear_repulsion_energy()
+    SCFE_old = SCFE
+    SCFE = Eelec + Enuc
+
+    
+    count += 1        
+
+print ("Number of iterations: %d\n" % count)
+print ("SCF Energy: %12.10f" % SCFE)
+print ("Runtime:      %6.6f\n" % (time.time() - start))
+start = time.time()
+print ("Energy from Psi4: % 12.10f" % energy('SCF'))
+print ("Psi4 runtime: %6.6f" % (time.time() - start))
