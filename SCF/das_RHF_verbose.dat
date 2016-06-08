@@ -1,0 +1,118 @@
+import numpy as np
+import time
+np.set_printoptions(precision=5, linewidth=150, suppress=True)
+
+# Allocate memory for Psi4 in GB
+memory 2 GB
+
+# Allocate memory for numpy in GB
+numpy_memory = 2
+
+molecule mol {
+    O
+    H 1 1.1
+    H 1 1.1 2 104
+symmetry c1
+}
+
+set {
+basis aug-cc-pVDZ
+scf_type pk
+e_convergence 1e-8
+}
+
+# Set defaults
+MAX_ITER = 20
+E_conv = 1.0E-8 # Energy convergence threshold
+D_conv = 1.0E-3 # dRMS convergence threshold
+
+# Generate integrals
+wfn = psi4.new_wavefunction(mol, psi4.get_global_option('BASIS'))
+t_0 = time.time()
+mints = psi4.MintsHelper(wfn.basisset())
+
+# Get overlap, nbf, ndocc for closed shell molecules
+S = np.asarray(mints.ao_overlap())
+nbf = S.shape[0]
+ndocc = wfn.nalpha()
+
+print('\nNumber of basis functions: %d' % nbf)
+print('\nNumber of occupied orbitals: %d' % ndocc)
+
+# Perform memory checks
+eri_size = ((nbf ** 4) * 8) / 1.e9
+print('\nSize of ERI tensor will be %4.2f GB.' % eri_size)
+
+mem_estimate = eri_size  * 1.5
+if mem_estimate > numpy_memory:
+    clean()
+    raise Exception('Estimated memory utilization of ERI tensor (%4.2f GB) exceeds \
+                    numpy_memory limit of %4.2f GB.' % (mem_estimate, numpy_memory))
+
+# Build core Hamiltonian and ERI tensor
+T = np.asarray(mints.ao_kinetic())
+V = np.asarray(mints.ao_potential())
+H = T + V
+I = np.asarray(mints.ao_eri())
+
+print('\nTime taken for integrals: %1.3f seconds.' % (time.time() - t_0))
+t_1 = time.time()
+
+# Build A = S^(-1/2)
+A = mints.ao_overlap()
+A.power(-0.5, 1.e-14)
+A = np.asarray(A)
+
+# Compute initial core guess
+H_p = A.dot(H).dot(A)
+eigvals_H_p, C2 = np.linalg.eigh(H_p)
+C = A.dot(C2)
+C_occ = C[:, :ndocc]
+D = np.einsum('pi,qi->pq', C_occ, C_occ)
+
+print('\nTotal setup time: %1.3f seconds' % (time.time() - t_1))
+
+print('\nStarting SCF Iterations:\n')
+
+t_2 = time.time()
+E_old = 0.0
+E_nuc = mol.nuclear_repulsion_energy()
+dE = 1
+
+for SCF_ITER in xrange(1, MAX_ITER + 1):
+
+    # Build J, K, & F
+    J = np.einsum('pqrs,rs->pq', I, D)
+    K = np.einsum('prqs,rs->pq', I, D)
+    F = H + 2*J - K
+
+    # Compute energies
+    E_elec = np.einsum('pq,pq->', H + F, D)
+    SCF_E = E_elec + E_nuc
+    dE = SCF_E - E_old
+
+    print('SCF Iteration %3d: Energy = %4.16f   dE = %1.5d' 
+    % (SCF_ITER, SCF_E, dE))
+    
+    if (abs(dE) < E_conv):
+        break    
+
+    # Update iteratives
+    E_old = SCF_E
+
+    # Diagonalize F
+    F_p = A.dot(F).dot(A)
+    eigvals_F_p, C2 = np.linalg.eigh(F_p)
+    C = A.dot(C2)
+    C_occ = C[:, :ndocc]
+    D = np.einsum('pi,qi->pq', C_occ, C_occ)
+
+    if SCF_ITER == MAX_ITER:
+        clean()
+        raise Exception('Maximum number of SCF iterations exceeded.')
+
+print('Total time for SCF iterations: %1.3f seconds\n' % (time.time() - t_2))
+print('Final SCF energy: %.8f hartree' % SCF_E)
+
+SCF_E_psi = energy('SCF')
+compare_values(SCF_E_psi, SCF_E, 6, 'SCF Energy')
