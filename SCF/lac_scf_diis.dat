@@ -1,0 +1,143 @@
+import numpy as np
+import math
+
+molecule mol {
+0 1
+O
+H 1 1.1
+H 1 1.1 2 104
+symmetry c1
+}
+
+set{
+    basis aug-cc-pVDZ
+    scf_type pk
+    guess core
+    maxiter 150
+    diis_max_vecs 10
+    diis_min_vecs 2
+    diis_start 1
+    e_convergence 1e-6
+    d_convergence 1e-6
+}
+
+# One-electron integrals and Core-Hamiltonian
+wfn = psi4.new_wavefunction(mol,psi4.get_global_option('BASIS'))
+mints = psi4.MintsHelper(wfn.basisset())
+S = np.asarray(mints.ao_overlap())
+T = np.asarray(mints.ao_kinetic())
+V = np.asarray(mints.ao_potential())
+H = T+V
+
+# Two-electron integrals
+nbf = S.shape[0]
+g_size = (nbf**4)*8/1.e9
+if g_size >1:
+    raise Exception("G tensor is too big!")
+g = np.asarray(mints.ao_eri())
+
+# Number of Doubly Occupied Orbitals
+ndocc = int((sum(mol.Z(A) for A in range(mol.natom()))-mol.molecular_charge())/2)
+
+# Guess Type: GWH or CORE
+if (psi4.get_global_option('GUESS')=='GWH'):
+    F0 = np.zeros((H.shape[0],H.shape[0]))
+    for m in range(H.shape[0]):
+        for n in range(H.shape[0]):
+            F0[m][n] = S[m][n]*0.5*(H[m][m]+H[n][n])
+    print ('Guess is GWH')
+else:
+    F0 = np.copy(H)
+    print ('Guess is CORE')
+
+# Orthonormalization of Fock Matrix
+eigval,eigvec = np.linalg.eigh(S)
+Shalf_eigval  = np.diag(eigval ** (-0.5))
+A = np.dot(eigvec,Shalf_eigval).dot(eigvec.T)
+Fp = np.dot(A.T,F0).dot(A)
+eigvals, C2 = np.linalg.eigh(Fp)
+C = np.dot(A,C2)
+
+# Density Matrix
+Cocc = C[:,:ndocc]
+D = np.dot(Cocc,Cocc.T)
+
+# Nuclear Repulsion Energy
+Enuc = 0
+geom = np.asarray(mol.geometry())
+for atomA in range(mol.natom()):
+    for atomB in range(atomA+1,mol.natom()):
+        Enuc+=mol.Z(atomA)*mol.Z(atomB)/sqrt((geom[atomA][0]-geom[atomB][0])**2+(geom[atomA][1]-geom[atomB][1])**2+(geom[atomA][2]-geom[atomB][2])**2)
+
+# Coulomb, Exchange and Fock matrices
+J = 2*np.einsum('pqrs,rs->pq', g,D)
+K = np.einsum('prqs,rs->pq',g,D)
+F = H + J - K
+
+# DIIS State and Error Vectors
+DIIS_S = []
+DIIS_R = []
+E_old = 0
+
+# SCF and DIIS iterations
+for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
+
+    # SCF Energy
+    Eelc = np.einsum('pq,pq->',H+F,D)
+    E_scf = Eelc+Enuc
+    dE = E_scf-E_old
+
+    #DIIS Procedure
+    if (SCF_iter >= psi4.get_global_option('DIIS_START')):
+        DIIS_S.append(F)
+        dim_diis = len(DIIS_S)
+        if (dim_diis > psi4.get_global_option('DIIS_MAX_VECS')):
+            del DIIS_S[0]
+            del DIIS_R[0] 
+        dim_diis = len(DIIS_S)
+        r = np.zeros_like(H)
+        r = A.T.dot(F.dot(D).dot(S)-S.dot(D).dot(F)).dot(A)
+        dRMS = np.mean(r**2)**0.5
+        DIIS_R.append(r)
+        if (dim_diis >= psi4.get_global_option('DIIS_MIN_VECS')):
+            B = np.zeros((dim_diis+1,dim_diis+1))
+            B[-1] = -1
+            B[:,-1] = -1
+            B[-1][-1] = 0
+            for i in range(dim_diis):
+                for j in range(dim_diis):
+                    B[i][j] = np.sum(DIIS_R[i]*DIIS_R[j])
+            b = np.zeros(dim_diis+1)
+            b[-1]=-1
+            diis_c = np.linalg.solve(B,b)
+            F = np.zeros_like(H)
+            for cx in range(diis_c.size-1):
+                F += diis_c[cx]*DIIS_S[cx]
+        
+
+    # Orthonormalization of Fock Matrix and SCF energy
+    Fp = np.dot(A.T,F).dot(A)
+    eigvals, C2 = np.linalg.eigh(Fp)
+    C = np.dot(A,C2)
+
+    Cocc = C[:,:ndocc]
+    D = np.dot(Cocc,Cocc.T)
+
+    J = 2*np.einsum('pqrs,rs->pq', g,D)
+    K = np.einsum('prqs,rs->pq',g,D)
+    F = H + J - K
+    E_old = E_scf
+    if (SCF_iter < psi4.get_global_option('DIIS_START')):
+        print ('SCF Iteration %2d: %12.11f        dE = %12.11f'  % (SCF_iter, E_scf, dE))
+    else:
+        print ('SCF Iteration %2d: %12.11f        dE = %12.10f        dRMS = %12.10f    DIIS'  % (SCF_iter, E_scf, dE, dRMS))
+    if (abs(dE) < psi4.get_global_option('E_CONVERGENCE') and abs(dRMS) < psi4.get_global_option('D_CONVERGENCE')):
+        print('SCF CONVERGED')
+        break
+    if (SCF_iter > psi4.get_global_option('MAXITER')):
+        raise Exception("Maximum number of iterations achieve without convergence")
+
+print('\nElectronic energy is  %12.10f' % Eelc)
+print('Nuclear energy is %12.10f' % Enuc)
+print('Total Enegy is %12.10f' % (E_scf))
+print('Psi4 Total Energy is %12.10f' % (energy('scf')))
