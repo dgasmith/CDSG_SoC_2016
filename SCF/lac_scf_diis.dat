@@ -12,12 +12,12 @@ symmetry c1
 set{
     basis aug-cc-pVDZ
     scf_type pk
-    guess core
+    guess gwh
     maxiter 150
     diis_max_vecs 10
     diis_min_vecs 2
     diis_start 1
-    e_convergence 1e-6
+    e_convergence 1e-8
     d_convergence 1e-6
 }
 
@@ -44,7 +44,10 @@ if (psi4.get_global_option('GUESS')=='GWH'):
     F0 = np.zeros((H.shape[0],H.shape[0]))
     for m in range(H.shape[0]):
         for n in range(H.shape[0]):
-            F0[m][n] = S[m][n]*0.5*(H[m][m]+H[n][n])
+            if (m==n):
+                F0[m,m] = H[m,m]
+            else:
+                F0[m,n] = S[m,n]*0.875*(H[m,m]+H[n,n])
     print ('Guess is GWH')
 else:
     F0 = np.copy(H)
@@ -70,9 +73,9 @@ for atomA in range(mol.natom()):
         Enuc+=mol.Z(atomA)*mol.Z(atomB)/sqrt((geom[atomA][0]-geom[atomB][0])**2+(geom[atomA][1]-geom[atomB][1])**2+(geom[atomA][2]-geom[atomB][2])**2)
 
 # Coulomb, Exchange and Fock matrices
-J = 2*np.einsum('pqrs,rs->pq', g,D)
+J = np.einsum('pqrs,rs->pq', g,D)
 K = np.einsum('prqs,rs->pq',g,D)
-F = H + J - K
+F = H + 2*J - K
 
 # DIIS State and Error Vectors
 DIIS_S = []
@@ -87,6 +90,10 @@ for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
     E_scf = Eelc+Enuc
     dE = E_scf-E_old
 
+
+    r = A.T.dot(F.dot(D).dot(S)-S.dot(D).dot(F)).dot(A)
+    dRMS = np.mean(r**2)**0.5
+
     #DIIS Procedure
     if (SCF_iter >= psi4.get_global_option('DIIS_START')):
         DIIS_S.append(F)
@@ -95,18 +102,15 @@ for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
             del DIIS_S[0]
             del DIIS_R[0] 
         dim_diis = len(DIIS_S)
-        r = np.zeros_like(H)
-        r = A.T.dot(F.dot(D).dot(S)-S.dot(D).dot(F)).dot(A)
-        dRMS = np.mean(r**2)**0.5
         DIIS_R.append(r)
         if (dim_diis >= psi4.get_global_option('DIIS_MIN_VECS')):
             B = np.zeros((dim_diis+1,dim_diis+1))
             B[-1] = -1
             B[:,-1] = -1
-            B[-1][-1] = 0
+            B[-1,-1] = 0
             for i in range(dim_diis):
                 for j in range(dim_diis):
-                    B[i][j] = np.sum(DIIS_R[i]*DIIS_R[j])
+                    B[i,j] = np.sum(DIIS_R[i]*DIIS_R[j])
             b = np.zeros(dim_diis+1)
             b[-1]=-1
             diis_c = np.linalg.solve(B,b)
@@ -123,14 +127,15 @@ for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
     Cocc = C[:,:ndocc]
     D = np.dot(Cocc,Cocc.T)
 
-    J = 2*np.einsum('pqrs,rs->pq', g,D)
+    J = np.einsum('pqrs,rs->pq', g,D)
     K = np.einsum('prqs,rs->pq',g,D)
-    F = H + J - K
+    F = H + 2*J - K
     E_old = E_scf
-    if (SCF_iter < psi4.get_global_option('DIIS_START')):
-        print ('SCF Iteration %2d: %12.11f        dE = %12.11f'  % (SCF_iter, E_scf, dE))
+
+    if (SCF_iter < psi4.get_global_option('DIIS_START') or dim_diis < psi4.get_global_option('DIIS_MIN_VECS')):
+        print ('SCF Iteration %2d: %12.14f        dE = %2.5E        dRMS = %2.5E'  % (SCF_iter, E_scf, dE, dRMS))
     else:
-        print ('SCF Iteration %2d: %12.11f        dE = %12.10f        dRMS = %12.10f    DIIS'  % (SCF_iter, E_scf, dE, dRMS))
+        print ('SCF Iteration %2d: %12.14f        dE = %2.5E        dRMS = %2.5E    DIIS'  % (SCF_iter, E_scf, dE, dRMS))
     if (abs(dE) < psi4.get_global_option('E_CONVERGENCE') and abs(dRMS) < psi4.get_global_option('D_CONVERGENCE')):
         print('SCF CONVERGED')
         break
