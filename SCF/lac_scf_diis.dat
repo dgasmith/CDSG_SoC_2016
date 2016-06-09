@@ -1,21 +1,18 @@
 import numpy as np
 import math
-import time
 
 molecule mol {
 0 1
 O
-C 1 1.16
-O 2 1.16 1 180
+H 1 1.1
+H 1 1.1 2 104
 symmetry c1
 }
 
 set{
-    basis cc-pVDZ
-    scf_type df
-    df_basis_scf cc-pVDZ-jkfit
-    df_scf_guess false
-    guess core
+    basis aug-cc-pVDZ
+    scf_type pk
+    guess gwh
     maxiter 150
     diis_max_vecs 10
     diis_min_vecs 2
@@ -26,31 +23,18 @@ set{
 
 # One-electron integrals and Core-Hamiltonian
 wfn = psi4.new_wavefunction(mol,psi4.get_global_option('BASIS'))
-t1 = time.time()
 mints = psi4.MintsHelper(wfn.basisset())
 S = np.asarray(mints.ao_overlap())
 T = np.asarray(mints.ao_kinetic())
 V = np.asarray(mints.ao_potential())
 H = T+V
 
+# Two-electron integrals
 nbf = S.shape[0]
 g_size = (nbf**4)*8/1.e9
 if g_size >1:
     raise Exception("G tensor is too big!")
-
-# Two-electron integrals
-if (psi4.get_global_option('SCF_TYPE')=='DF'):
-    # This is a slight hack of Psi4, it was never ment to do this.
-    scf_e, scf_wfn = energy('SCF', return_wfn=True)
-    dfobj = DFTensor(scf_wfn, "DF_BASIS_SCF")
-    Qpq = np.asarray(dfobj.Qso())
-
-    # Build the density fitted version
-    #Idf = np.einsum('Qpq,Qrs->pqrs', Qpq, Qpq)
-    print ('SCF Type: DF')
-else:
-    g = np.asarray(mints.ao_eri())
-    print ('SCF Type: PK')
+g = np.asarray(mints.ao_eri())
 
 # Number of Doubly Occupied Orbitals
 ndocc = int((sum(mol.Z(A) for A in range(mol.natom()))-mol.molecular_charge())/2)
@@ -81,17 +65,17 @@ C = np.dot(A,C2)
 Cocc = C[:,:ndocc]
 D = np.dot(Cocc,Cocc.T)
 
-print('Total time taken for setup: %.3f seconds' % (time.time() - t1))
-
-print('\nStart SCF iterations:')
-t = time.time()
-
 # Nuclear Repulsion Energy
 Enuc = 0
 geom = np.asarray(mol.geometry())
 for atomA in range(mol.natom()):
     for atomB in range(atomA+1,mol.natom()):
         Enuc+=mol.Z(atomA)*mol.Z(atomB)/sqrt((geom[atomA][0]-geom[atomB][0])**2+(geom[atomA][1]-geom[atomB][1])**2+(geom[atomA][2]-geom[atomB][2])**2)
+
+# Coulomb, Exchange and Fock matrices
+J = np.einsum('pqrs,rs->pq', g,D)
+K = np.einsum('prqs,rs->pq',g,D)
+F = H + 2*J - K
 
 # DIIS State and Error Vectors
 DIIS_S = []
@@ -100,21 +84,6 @@ E_old = 0
 
 # SCF and DIIS iterations
 for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
-
-    # Coulomb, Exchange matrices
-    if (psi4.get_global_option('SCF_TYPE')=='DF'):
-        # Coulomb Object
-        xp = np.einsum('Qpq,pq->Q',Qpq,D)
-        J = np.einsum('Qrs,Q->rs',Qpq,xp)
-        # Exchange Object
-        zeta = np.einsum('Qsq,pq->Qsp',Qpq,D)
-        K = np.einsum('Qrp,Qsp->rs',Qpq,zeta)
-    else:
-        J = np.einsum('pqrs,rs->pq', g,D)
-        K = np.einsum('prqs,rs->pq',g,D)
-    # Fock Matrix
-    F = H + 2*J - K
-
 
     # SCF Energy
     Eelc = np.einsum('pq,pq->',H+F,D)
@@ -158,6 +127,9 @@ for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
     Cocc = C[:,:ndocc]
     D = np.dot(Cocc,Cocc.T)
 
+    J = np.einsum('pqrs,rs->pq', g,D)
+    K = np.einsum('prqs,rs->pq',g,D)
+    F = H + 2*J - K
     E_old = E_scf
 
     if (SCF_iter < psi4.get_global_option('DIIS_START') or dim_diis < psi4.get_global_option('DIIS_MIN_VECS')):
@@ -165,13 +137,11 @@ for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
     else:
         print ('SCF Iteration %2d: %12.14f        dE = %2.5E        dRMS = %2.5E    DIIS'  % (SCF_iter, E_scf, dE, dRMS))
     if (abs(dE) < psi4.get_global_option('E_CONVERGENCE') and abs(dRMS) < psi4.get_global_option('D_CONVERGENCE')):
-        print('SCF CONVERGED\n')
+        print('SCF CONVERGED')
         break
     if (SCF_iter > psi4.get_global_option('MAXITER')):
         raise Exception("Maximum number of iterations achieve without convergence")
 
-print('Total time for SCF iterations: %.3f seconds' % (time.time() - t))
-print('Total time for the program: %.3f seconds' %(time.time()-t1))
 print('\nElectronic energy is  %12.10f' % Eelc)
 print('Nuclear energy is %12.10f' % Enuc)
 print('Total Enegy is %12.10f' % (E_scf))
