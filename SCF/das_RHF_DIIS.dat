@@ -1,0 +1,150 @@
+import numpy as np
+import time
+np.set_printoptions(precision=5, linewidth=150, suppress=True)
+
+# Allocate memory for Psi4 in GB
+memory 2 GB
+
+# Allocate memory for numpy in GB
+numpy_memory = 2
+
+molecule mol {
+    O
+    H 1 1.1
+    H 1 1.1 2 104
+symmetry c1
+}
+
+set {
+basis aug-cc-pVDZ
+scf_type pk
+e_convergence 1e-8
+}
+
+# Set defaults
+MAX_ITER = 20
+E_conv = 1.0E-8 # Energy convergence threshold
+D_conv = 1.0E-3 # dRMS convergence threshold
+
+# Generate integrals
+wfn = psi4.new_wavefunction(mol, psi4.get_global_option('BASIS'))
+t_0 = time.time()
+mints = psi4.MintsHelper(wfn.basisset())
+
+# Get overlap, nbf, ndocc for closed shell molecules
+S = np.asarray(mints.ao_overlap())
+nbf = S.shape[0]
+ndocc = wfn.nalpha()
+
+print('\nNumber of basis functions: %d' % nbf)
+print('Number of occupied orbitals: %d' % ndocc)
+
+# Perform memory checks
+eri_size = ((nbf ** 4) * 8) / 1.e9
+print('\nSize of ERI tensor will be %4.2f GB.' % eri_size)
+
+mem_estimate = eri_size  * 1.5
+if mem_estimate > numpy_memory:
+    clean()
+    raise Exception('Estimated memory utilization of ERI tensor (%4.2f GB) exceeds \
+                    numpy_memory limit of %4.2f GB.' % (mem_estimate, numpy_memory))
+
+# Build core Hamiltonian and ERI tensor
+T = np.asarray(mints.ao_kinetic())
+V = np.asarray(mints.ao_potential())
+H = T + V
+I = np.asarray(mints.ao_eri())
+
+print('Time taken for integrals: %1.3f seconds.' % (time.time() - t_0))
+t_1 = time.time()
+
+# Build A = S^(-1/2)
+A = mints.ao_overlap()
+A.power(-0.5, 1.e-14)
+A = np.asarray(A)
+
+# Compute initial core guess
+H_p = A.dot(H).dot(A)
+eigvals_H_p, C2 = np.linalg.eigh(H_p)
+C = A.dot(C2)
+C_occ = C[:, :ndocc]
+D = np.einsum('pi,qi->pq', C_occ, C_occ)
+
+print('\nTotal setup time: %1.3f seconds' % (time.time() - t_1))
+
+print('\nStarting RHF-SCF Iterations:\n')
+
+t_2 = time.time()
+E_old = 0.0
+E_nuc = mol.nuclear_repulsion_energy()
+dE = 1
+
+F_list = []
+DIIS_err_list = []
+
+for SCF_ITER in xrange(1, MAX_ITER + 1):
+
+    # Build J, K, & F
+    J = np.einsum('pqrs,rs->pq', I, D)
+    K = np.einsum('prqs,rs->pq', I, D)
+    F = H + 2*J - K
+
+    # Build DIIS error matrix
+    diis_err = A.T.dot(F.dot(D).dot(S) - S.dot(D).dot(F)).dot(A)
+
+    # Append Fock matrix and AO gradient to F_list and DIIS_err_list
+    F_list.append(F)
+    DIIS_err_list.append(diis_err)
+
+    # Compute energies
+    E_elec = np.einsum('pq,pq->', H + F, D)
+    SCF_E = E_elec + E_nuc
+    dE = SCF_E - E_old
+    dRMS = np.mean(diis_err ** 2) ** 0.5 # Root mean square of the maximum diis error
+
+    print('RHF Iteration %3d: Energy = %4.16f   dE = % 1.5E   dRMS = %1.5E' 
+    % (SCF_ITER, SCF_E, dE, dRMS))
+    
+    if (abs(dE) < E_conv) and (dRMS < D_conv):
+        break    
+
+    # Update iteratives
+    E_old = SCF_E
+
+    # Build error vector inner product matrix, B
+    b_len = len(F_list) + 1 # B is (NxN + 1) square; N = # previous F guesses
+    B = np.zeros((b_len, b_len))
+    B[-1] = -1 # Make bottom row -1
+    B[:, -1] = -1 # Make last column -1
+    B[-1, -1] = 0 # Make bottom right element 0
+    for i in  xrange(b_len - 1):
+        for j in xrange(i, b_len - 1):
+            B[i, j] = B[j, i]  = np.sum(DIIS_err_list[i] * DIIS_err_list[j]) # B symmetric
+    # Build RHS of Lagrange multiplier matrix equation
+    rhs = np.zeros((b_len))
+    rhs[-1] = -1
+    
+    # Solve Lagrange multiplier equation for coefficient matrix
+    resi_coeff = np.linalg.solve(B, rhs)
+    
+    # Build DIIS Fock guess
+    F_diis = np.zeros_like(F)
+    for c in xrange(resi_coeff.shape[0] - 1):
+        F_diis += resi_coeff[c] * F_list[c]
+    
+    # Diagonalize F_diis
+    F_p = A.dot(F_diis).dot(A)
+    eigvals_F_p, C2 = np.linalg.eigh(F_p)
+    C = A.dot(C2)
+    C_occ = C[:, :ndocc]
+    D = np.einsum('pi,qi->pq', C_occ, C_occ)
+
+    if SCF_ITER == MAX_ITER:
+        clean()
+        raise Exception('Maximum number of SCF iterations exceeded.')
+
+print('Total time for SCF iterations: %1.3f seconds\n' % (time.time() - t_2))
+print('Final SCF energy: %.8f hartree' % SCF_E)
+
+SCF_E_psi = energy('SCF')
+compare_values(SCF_E_psi, SCF_E, 6, 'SCF Energy')
