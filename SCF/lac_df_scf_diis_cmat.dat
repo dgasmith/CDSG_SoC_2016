@@ -111,7 +111,7 @@ for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
         xp = np.dot(np.reshape(Qpq,(-1,main_nbf*main_nbf)),np.reshape(D,main_nbf*main_nbf))
         J = np.dot(np.reshape(Qpq.T,(main_nbf*main_nbf,-1)),xp).reshape(main_nbf,main_nbf)
         # Exchange Object
-        zeta = np.dot(np.reshape(Qpq,(-1,main_nbf)),D.T).reshape(Qpq.shape)
+        # zeta = np.dot(np.reshape(Qpq,(-1,main_nbf)),D.T).reshape(Qpq.shape)
         # zeta = np.einsum('Prq,pq->Prp',Qpq,Cocc)
         zeta = np.dot(np.reshape(Qpq,(-1,main_nbf)),Cocc).reshape(aux_nbf,main_nbf,ndocc)
         #raise Exception("OK")
