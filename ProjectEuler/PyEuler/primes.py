@@ -1,4 +1,4 @@
-"Module containing functions useful for handline prime numbers."
+"Module containing functions useful for handling prime numbers."
 
 import numpy as np
 
