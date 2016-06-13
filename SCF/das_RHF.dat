@@ -125,6 +125,9 @@ for SCF_ITER in xrange(1, MAX_ITER + 1):
                 z_1 = np.dot(C_occ.T, Qpq.reshape(nQ * norb, norb).T).T.reshape(nQ, norb, ndocc)
             elif Z_build == 'direct':
                 z_1 = np.dot(Qpq.reshape(nQ * norb, norb), C_occ).reshape(nQ, norb, ndocc)
+            else:
+                raise Exception("Not a recognized Z matrix build option. Please choose triple-\
+                                transpose (`TTT') or direct (`direct').")
             Z_1 = z_1.swapaxes(1,2).reshape(nQ * ndocc, norb)
             if np.allclose(C_occ, C_occ):
                 # C_ij = C_ik
