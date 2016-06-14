@@ -16,8 +16,8 @@ symmetry c1
 }
 
 set {
-basis cc-pVDZ
-#df_basis_scf cc-pVDZ-jkfit
+basis aug-cc-pVTZ
+df_basis_scf cc-pVTZ-jkfit
 e_convergence 1e-8
 }
 
@@ -29,8 +29,9 @@ D_conv = 1.0E-3 # dRMS convergence threshold
 # SCF Options
 diis_max_vecs = 10
 diis_start = 1
-df_rhf=False
+df_rhf=True
 MMult = 'BLAS'
+Z_build = 'direct'
 
 # Generate integrals
 wfn = psi4.new_wavefunction(mol, psi4.get_global_option('BASIS'))
@@ -119,14 +120,23 @@ for SCF_ITER in xrange(1, MAX_ITER + 1):
             ## Contract 'Qpq,Q->pq' with GEMV compound indices i,ij->j
             J = np.dot(Qpq.reshape(nQ, norb * norb).T, X_p).reshape(norb, norb)
             # Build K @ O(pN^2 Naux)
-            Z_1 = np.dot(C_occ.T, Qpq.reshape(nQ * norb, norb).T)
+            ## Build intermediate matrix Z
+            if Z_build == 'TTT':
+                z_1 = np.dot(C_occ.T, Qpq.reshape(nQ * norb, norb).T).T.reshape(nQ, norb, ndocc)
+            elif Z_build == 'direct':
+                z_1 = np.dot(Qpq.reshape(nQ * norb, norb), C_occ).reshape(nQ, norb, ndocc)
+            else:
+                raise Exception("Not a recognized Z matrix build option. Please choose triple-\
+                                transpose (`TTT') or direct (`direct').")
+            Z_1 = z_1.swapaxes(1,2).reshape(nQ * ndocc, norb)
             if np.allclose(C_occ, C_occ):
                 # C_ij = C_ik
-                K = np.dot(Z_1.reshape(-1, norb).T, Z_1.reshape(-1, norb)).reshape(norb, norb)
+                K = np.dot(Z_1.T, Z_1)
             else:
                 # C_ij != C_ik
-                Z_2 = np.dot(Qpq.reshape(nQ * norb, nocc), C_occ.T)
-                K = np.dot(Z_1.reshape(-1, norb).T, Z_2.reshape(-1, norb)).reshape(norb, norb)
+                z_2 = np.dot(Qpq.reshape(nQ * norb, nocc), C_occ.T).reshape(nQ, norb, ndocc)
+                Z_2 = z_2.swapaxes(1,2).reshape(nQ * ndocc, norb)
+                K = np.dot(Z_1.T, Z_2)
         elif MMult == 'einsum':
             # Build J @ O(N^2 Naux)
             X_p = np.einsum('Qpq,pq->Q', Qpq, D)
