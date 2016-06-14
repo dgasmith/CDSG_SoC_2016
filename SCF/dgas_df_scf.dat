@@ -1,0 +1,348 @@
+import numpy as np
+import math
+import time
+import scipy.linalg.blas as blas
+import scipy.linalg as sl
+
+memory 10 GB 
+
+molecule mol {
+0 1
+O
+H 1 1.1
+H 1 1.1 2 90
+
+#C    1.39410    0.00000   0.00000
+#C    0.69705   -1.20732   0.00000
+#C   -0.69705   -1.20732   0.00000
+#C   -1.39410    0.00000   0.00000
+#C   -0.69705    1.20732   0.00000
+#C    0.69705    1.20732   0.00000
+#H    2.47618    0.00000   0.00000
+#H    1.23809   -2.14444   0.00000
+#H   -1.23809   -2.14444   0.00000
+#H   -2.47618    0.00000   0.00000
+#H   -1.23809    2.14444   0.00000
+#H    1.23809    2.14444   0.00000
+symmetry c1
+}
+
+set{
+    scf_type        df
+    basis           aug-cc-pVDZ
+#    df_basis_scf    cc-pVDZ-jkfit
+    df_scf_guess    false
+    guess           core
+    maxiter         20
+    e_convergence   1e-8
+    d_convergence   1e-6
+}
+
+# einsum, blas, looped_blas, psi, magic
+jk_algorithm = 'blas'
+soscf = True
+
+# One-electron integrals and Core-Hamiltonian
+wfn = psi4.new_wavefunction(mol,psi4.get_global_option('BASIS'))
+t1 = time.time()
+mints = psi4.MintsHelper(wfn.basisset())
+S = np.asarray(mints.ao_overlap())
+T = np.asarray(mints.ao_kinetic())
+V = np.asarray(mints.ao_potential())
+H = T + V
+
+nbf = S.shape[0]
+
+print('Norbs:   %4d' % nbf)
+print('Nalpha:  %4d\n' % wfn.nalpha())
+ndocc = wfn.nalpha()
+nvirt = nbf - ndocc
+
+# Two-electron integrals
+if jk_algorithm in ['einsum', 'loop_blas', 'blas', 'magic']:
+    g_size = (nbf**3) * 16 / 1.e9
+    if g_size > 8:
+        raise Exception("DF tensor is too big!")
+
+    # This is a slight hack of Psi4, it was never ment to do this.
+    #scf_e, scf_wfn = energy('SCF', return_wfn=True)
+    #dfobj = DFTensor(wfn, "DF_BASIS_SCF")
+
+    # Calling it the hard way
+    aux = psi4.BasisSet.pyconstruct_auxiliary(wfn.molecule(), 'DF_BASIS_SCF', '',
+                                              'JKFIT', psi4.get_global_option('BASIS'))
+    zeroC = psi4.Matrix(nbf, nbf)
+    dfobj = DFTensor(wfn.basisset(), aux, zeroC, ndocc, nvirt)
+
+    Qpq = np.asarray(dfobj.Qso())
+    nQ = Qpq.shape[0]
+
+    print ('SCF Type: %s' % jk_algorithm)
+else:
+    # Memory and integrals handled by Psi4
+    print('SCF Type: Psi')
+
+# Guess Type: GWH or CORE
+if (psi4.get_global_option('GUESS') == 'GWH'):
+    dH = np.diag(H)
+    F0 = 0.875 * S * (dH + dH[:, None])
+    F0[np.diag_indices_from(H)] = dH 
+    print ('Guess is GWH')
+    iter_type = 'GWH'
+else:
+    F0 = np.copy(H)
+    print ('Guess is CORE')
+    iter_type = 'CORE'
+
+# Orthonormalization of Fock Matrix
+eigval, eigvec = np.linalg.eigh(S)
+Shalf_eigval  = np.diag(eigval ** (-0.5))
+A = np.dot(eigvec, Shalf_eigval).dot(eigvec.T)
+
+def diag_H(F, ndocc):
+    # Build orbitals and density
+    Fp = np.dot(A.T, F).dot(A)
+    eigvals, C2 = np.linalg.eigh(Fp)
+    C = np.dot(A, C2)
+    Cocc = C[:, :ndocc].copy()
+    D = np.dot(Cocc, Cocc.T)
+    return C, Cocc, D
+
+C, Cocc, D = diag_H(F0, ndocc)
+
+print('\nTotal time taken for setup: %.3f seconds' % (time.time() - t1))
+
+print('\nStart SCF iterations:')
+t = time.time()
+
+# Nuclear Repulsion Energy
+Enuc = 0
+geom = np.asarray(mol.geometry())
+for atomA in range(mol.natom()):
+    for atomB in range(atomA+1,mol.natom()):
+        Enuc += mol.Z(atomA)*mol.Z(atomB) / np.linalg.norm(geom[atomA] - geom[atomB]) 
+
+# DIIS State and Error Vectors
+DIIS_S = []
+DIIS_R = []
+E_old = 0
+jk_time = 0.0
+diis_time = 0.0
+
+# Setup specific to jk_algorithm selection
+if jk_algorithm == 'blas':
+    zeta1 = np.zeros((nQ * nbf, ndocc))
+    zeta2 = np.zeros((nQ, ndocc, nbf))
+
+if jk_algorithm == 'psi':
+    jk = psi4.JK.build_JK(wfn.basisset())
+    jk.initialize()
+    psiC = psi4.Matrix(Cocc.shape[0], Cocc.shape[1])
+    jk.C_left().append(psiC) 
+
+    # Build a view of the Psi4 array
+    np_viewC = np.asarray(psiC)
+
+
+# SCF and DIIS iterations
+for SCF_iter in range(1,psi4.get_global_option('MAXITER')+1):
+
+    # Coulomb, Exchange matrices
+    jkt = time.time()
+    if (psi4.get_global_option('SCF_TYPE') == 'DF'):
+        if jk_algorithm == 'einsum':
+            # Coulomb Object
+            xp = np.einsum('Qpq,pq->Q', Qpq, D)
+            J = np.einsum('Qrs,Q->rs', Qpq, xp)
+
+            # Exchange Object
+            zeta = np.einsum('Qpq,qi->Qpi', Qpq, Cocc)
+            K = np.einsum('Qpi,Qqi->pq', zeta, zeta)
+
+        elif jk_algorithm == 'blas':
+            # Coulomb Object
+            xp = np.dot(Qpq.reshape(nQ, nbf * nbf), D.ravel())
+            J = np.dot(xp, Qpq.reshape(nQ, nbf * nbf)).reshape(D.shape)
+
+            # Exchange Object
+            zeta2.shape = (nQ, ndocc, nbf)
+            np.dot(Qpq.reshape(nQ * nbf, nbf), Cocc, out=zeta1)
+            np.einsum('Qpi->Qip', zeta1.reshape(nQ, nbf, ndocc), out=zeta2)
+            zeta2.shape = (nQ * ndocc, nbf)
+            K = np.dot(zeta2.T, zeta2)
+
+        elif jk_algorithm == 'loop_blas':
+            # Coulomb Object
+            xp = np.dot(Qpq.reshape(nQ, nbf * nbf), D.ravel())
+            J = np.dot(xp, Qpq.reshape(nQ, nbf * nbf)).reshape(D.shape)
+
+            # Exchange Object
+            K = np.zeros_like(J)
+
+            tmp = np.zeros((nbf, ndocc))
+            for q in range(nQ):
+                blas.dgemm(1.0, Cocc.T, Qpq[q].T, beta=0.0,
+                           c=tmp.T, trans_a=False, trans_b=False, overwrite_c=True)
+                blas.dgemm(1.0, tmp.T, tmp.T, beta=1.0, c=K.T, trans_a=True, trans_b=False,
+                               overwrite_c=True)
+            K = K.T
+        elif jk_algorithm == 'magic':
+            # Coulomb Object
+            xp = np.dot(D.ravel().T, Qpq.reshape(nQ, nbf * nbf).T)
+            J = np.dot(xp, Qpq.reshape(nQ, nbf * nbf)).reshape(D.shape)
+
+            # Exchange Object
+            K = np.zeros_like(J)
+
+            tmp = np.zeros((ndocc, nbf), order='F')
+            for q in range(nQ):
+                blas.dsymm(1.0, Qpq[q].T, Cocc.T, beta=0.0,
+                           c=tmp, side=True, lower=False, overwrite_c=True)
+                
+                blas.dgemm(1.0, tmp.T, tmp.T, beta=1.0, c=K.T, trans_a=False, trans_b=True,
+                               overwrite_c=True)
+            K = K.T
+
+        elif jk_algorithm == 'psi':
+            # Set the JK C object
+            np_viewC[:] = Cocc
+            jk.compute()
+    
+            J = np.asarray(jk.J()[0])
+            K = np.asarray(jk.K()[0])
+
+        else:
+            raise Exception("JK algorithm %s is not recognized' % jk_algorithm")
+
+    else:
+        J = np.einsum('pqrs,rs->pq', g, D)
+        K = np.einsum('prqs,rs->pq', g, D)
+
+    jk_time += time.time() - jkt 
+
+    # Fock Matrix
+    F = H + 2 * J - K
+
+    # SCF Energy
+    Eelc = np.einsum('pq,pq->', H + F, D)
+    E_scf = Eelc + Enuc
+    dE = E_scf - E_old
+
+
+    r = A.T.dot(F.dot(D).dot(S) - S.dot(D).dot(F)).dot(A)
+    grad = (F.dot(D).dot(S) - S.dot(D).dot(F))
+    
+    dRMS = np.mean(r ** 2) ** 0.5
+
+    print('SCF Iteration %2d: %20.14f   dE = % 2.5E   dRMS = % 2.5E  %s'  % (SCF_iter, E_scf, dE, dRMS, iter_type))
+    if (abs(dE) < psi4.get_global_option('E_CONVERGENCE') and abs(dRMS) < psi4.get_global_option('D_CONVERGENCE')):
+        print('SCF CONVERGED\n')
+        break
+
+    #DIIS Procedure
+    if (soscf and (dRMS < 1.e-2)):
+
+        g_size = (nbf**4) * 16 / 1.e9
+        if g_size > 8:
+            raise Exception("Exact SOSCF requires 2 * N^4 memory, this currently exceeds 8GB")
+
+        grad = -4 * np.dot(C.T, F).dot(C)[:ndocc, ndocc:]
+        Fmo = np.einsum('ij,jk,kl->il', C.T, F, C)
+
+        # Build G (exact integrals)
+        Qmo = np.einsum('Qpq,pi,qj->Qij', Qpq, C, C)
+        g_mo = np.einsum('Qpq,Qrs->pqrs', Qmo, Qmo)
+
+        # Build Hessian
+        delta = np.diag(np.ones(nbf))
+        Hess = np.einsum('np,mi->mnip', Fmo, delta)
+        Hess -= np.einsum('mi,np->mnip', Fmo, delta)
+        Hess += 4.0 * g_mo
+        Hess -= np.einsum('mpin->mnip', g_mo)
+        Hess -= np.einsum('npim->mnip', g_mo)
+        Hess = Hess[:ndocc, ndocc:, :ndocc, ndocc:]
+        Hess *= 4
+        
+        nrot = ndocc * nvirt
+
+        # Solve for kappa  
+        k = np.linalg.solve(Hess.reshape(nrot, nrot), -grad.ravel()) 
+        k.shape = (ndocc, nvirt)
+
+        # Build the full Kappa matrix
+        full_K = np.zeros((nbf, nbf))
+        full_K[:ndocc, ndocc:] = k
+        full_K[ndocc:, :ndocc] = -k.T
+        
+        # Construct U and new orbitals
+        U = sl.expm(full_K)
+        C = np.dot(C, U)
+
+        # Update other matrices
+        Cocc = C[:, :ndocc].copy()
+        D = np.dot(Cocc, Cocc.T)
+        iter_type = 'SOSCF'
+        
+
+    elif (SCF_iter >= psi4.get_global_option('DIIS_START')):
+        diist = time.time()
+        DIIS_S.append(F)
+        dim_diis = len(DIIS_S)
+
+        # Delete first vecs
+        if (dim_diis > psi4.get_global_option('DIIS_MAX_VECS')):
+            del DIIS_S[0]
+            del DIIS_R[0] 
+
+        dim_diis = len(DIIS_S)
+        DIIS_R.append(r)
+        if (dim_diis >= psi4.get_global_option('DIIS_MIN_VECS')):
+            B = np.zeros((dim_diis + 1, dim_diis + 1))
+
+            B[-1] = -1
+            B[:, -1] = -1
+            B[-1, -1] = 0
+
+            for i in range(dim_diis):
+                for j in range(i, dim_diis):
+                    B[i, j] = B[j, i] = np.sum(DIIS_R[i] * DIIS_R[j])
+
+            b = np.zeros(dim_diis + 1)
+            b[-1] = -1
+
+            diis_c = np.linalg.solve(B, b)
+
+            # Construct new fock matrix
+            F = np.zeros_like(H)
+            for cx in range(diis_c.size - 1):
+                F += diis_c[cx] * DIIS_S[cx]
+
+        diis_time += time.time() - diist 
+        iter_type = 'DIIS'
+
+        # Orthonormalization of Fock Matrix and SCF energy
+        C, Cocc, D = diag_H(F, ndocc)
+    else:
+        iter_type = 'DIAG'
+
+        # Orthonormalization of Fock Matrix and SCF energy
+        C, Cocc, D = diag_H(F, ndocc)
+
+    E_old = E_scf
+
+    if (SCF_iter > psi4.get_global_option('MAXITER')):
+        raise Exception("Maximum number of iterations achieve without convergence")
+
+print('\nTimings:')
+print('DIIS time:          %3.6f seconds' % diis_time)
+print('JK  build:          %3.6f seconds' % jk_time)
+print('SCF iterations:     %3.6f seconds' % (time.time() - t))
+print('SCF program:        %3.6f seconds' % (time.time() - t1))
+
+print('\nElectronic Energy:       % 15.10f' % Eelc)
+print('Nuclear Energy:          % 15.10f' % Enuc)
+print('Total Energy:            % 15.10f' % (E_scf))
+#t = time.time()
+#print('\nPsi4 Total Energy:       % 15.10f' % (energy('scf')))
+#
+#print('Total Psi4 SCF time %3.6f seconds' % (time.time() - t))
