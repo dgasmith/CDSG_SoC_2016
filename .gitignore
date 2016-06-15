@@ -4,3 +4,7 @@ Untitled.ipynb
 *.clean
 *.out
 timer.dat
+*log
+*tex
+*synctex.gz
+*aux

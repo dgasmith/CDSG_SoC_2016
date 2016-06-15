@@ -3,10 +3,10 @@ import time
 np.set_printoptions(precision=5, linewidth=150, suppress=True)
 
 # Allocate memory for Psi4 in GB
-memory 2 GB
+memory 12 GB
 
 # Allocate memory for numpy in GB
-numpy_memory = 2
+numpy_memory = 12
 
 molecule mol {
 O
@@ -16,8 +16,8 @@ symmetry c1
 }
 
 set {
-basis aug-cc-pVTZ
-df_basis_scf cc-pVTZ-jkfit
+basis aug-cc-pVQZ
+df_basis_scf cc-pVQZ-jkfit
 e_convergence 1e-8
 }
 
@@ -236,6 +236,8 @@ for SCF_ITER in xrange(1, MAX_ITER + 1):
 
 print('\nTotal time for SCF iterations: %1.3f seconds\n' % (time.time() - t_2))
 print('Final SCF energy: %.8f hartree' % SCF_E)
-
+print('Total time for SCF: %1.3f seconds' % (time.time() - t_0))
+t_psi = time.time()
 SCF_E_psi = energy('SCF')
+print('Total time for Psi4: %1.3f seconds' % (time.time() - t_psi))
 compare_values(SCF_E_psi, SCF_E, 6, 'SCF Energy')
