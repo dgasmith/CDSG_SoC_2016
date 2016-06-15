@@ -54,7 +54,7 @@ print('The N^4 K algorithm took      %10.6f seconds. Correct? %s' %\
 # N^4 K BLAS algorithm
 t = time.time()
 tmp1 = np.dot(Qpq.reshape(-1, norb), D.T).reshape(Qpq.shape)
-tmp1 = np.einsum('Qqr->Qrq', tmp1)
+tmp1 = np.einsum('Qir->Qri', tmp1)
 K_n4_BLAS = np.dot(Qpq.reshape(nQ * norb, norb).T, tmp1.reshape(-1, norb))
 print('The N^4 K BLAS algorithm took %10.6f seconds. Correct? %s' %\
                 (time.time() - t, np.allclose(K_n5, K_n4_BLAS)))
