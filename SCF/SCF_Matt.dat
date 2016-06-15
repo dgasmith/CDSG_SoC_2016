@@ -1,6 +1,6 @@
 #SCF Implementation with DIIS using Psi4 molecule, MintsHelper, and wfn.
 
-import numpy as num
+import numpy
 import time 
 print "SCF Implementation with DIIS, DF, BlAS options\n"
 
@@ -15,13 +15,13 @@ start = time.time()
 
 set {
     scf_type df
-    df_basis_scf cc-pV5Z-jkfit
-    basis cc-pV5Z
+    df_basis_scf cc-pVDZ
+    basis cc-pVDZ
 }
 
 Zconstruction = 0
 conv_tol = 1e-10
-DIIS, DIIS_size = True, 10
+DIIS, DIIS_size = False, 10
 DF, BLAS = True, True
 
 
@@ -30,25 +30,25 @@ wfn = psi4.new_wavefunction(mol,psi4.get_global_option('BASIS'))
 #The MintsHelper object places molecular integrals (and later derivative integrals) on disk.
 M = psi4.MintsHelper(wfn.basisset())
 #Access orbital overlaps, store in matrix S.
-S = num.asarray(M.ao_overlap())
+S = np.asarray(M.ao_overlap())
 #Access kinetic energies, store in matrix T
-T = num.asarray(M.ao_kinetic())
+T = np.asarray(M.ao_kinetic())
 #Access coloumbic energies, store in matrix V
-V = num.asarray(M.ao_potential())
+V = np.asarray(M.ao_potential())
 #Store Hamiltonian.
 H = T + V
 
 
 #A = S^(1/2)
-eigval, eigvec = num.linalg.eigh(S)
+eigval, eigvec = np.linalg.eigh(S)
 eigval **= -0.5
-A = num.dot(eigvec*eigval,eigvec.T)
+A = np.dot(eigvec*eigval,eigvec.T)
 ndocc = wfn.nalpha()
 
 
 #Diagonalize F and Produce Density Matrix
-Fp = num.dot(A.T,H).dot(A)
-eigval, eigvec = num.linalg.eigh(Fp)
+Fp = np.dot(A.T,H).dot(A)
+eigval, eigvec = np.linalg.eigh(Fp)
 C = np.dot(A,eigvec)
 Cocc = C[:,:ndocc]
 D = np.dot(Cocc,Cocc.T)
@@ -70,8 +70,8 @@ Qpq = np.asarray(dfobj.Qso())
 s = np.shape(Qpq)
 
 #Build the 4D tensor if DF is not selected
-if DF != 1:
-    Idf = np.einsum('Qpq,Qrs->pqrs',Qpq,Qpq)
+if not DF:
+    g = np.einsum('Qpq,Qrs->pqrs',Qpq,Qpq)
 
 
 #Apply variational method which knows when to stop.
@@ -84,6 +84,7 @@ ztime = 0
 trials = []
 errors = []
 
+
 itstart = time.time()
 while SCFE_old - SCFE > conv_tol:
     
@@ -91,19 +92,20 @@ while SCFE_old - SCFE > conv_tol:
         raise Exception("Calculation Exceeds 100 Iterations!")
 
     #Construct Fock Matrix and append to trials
-    if DF != 1:
+    
+    if not DF:
         #O(n^5) in both cases
-        J = num.einsum('pqrs,rs->pq',Idf,D)
-        K = num.einsum('prqs,rs->pq',Idf,D)
-    if DF == 1:
-        if BLAS != 1:
+        J = np.einsum('pqrs,rs->pq',g,D)
+        K = np.einsum('prqs,rs->pq',g,D)
+    elif DF:
+        if not BLAS:
             #J Construction O(N^3) using einsum
-            tmp = num.einsum('Qrs,rs->Q',Qpq,D)
-            J = num.einsum('Qpq,Q->pq',Qpq,tmp)
+            tmp = np.einsum('Qrs,rs->Q',Qpq,D)
+            J = np.einsum('Qpq,Q->pq',Qpq,tmp)
                         
             #K Construction: O(N^4) using einsum
-            #tmp = num.einsum('Qqs,rs->Qqr',Qpq,D)
-            #K = num.einsum('Qqr,Qrp->pq',tmp,Qpq)
+            #tmp = np.einsum('Qqs,rs->Qqr',Qpq,D)
+            #K = np.einsum('Qqr,Qrp->pq',tmp,Qpq)
 
             #K Construction: O(pN^2Naux) using orbital matrix and einsum
             Z1 = np.einsum('Qrs,sq->Qrq',Qpq,Cocc)
@@ -122,7 +124,7 @@ while SCFE_old - SCFE > conv_tol:
             #K = np.dot(Qpq.reshape(s[0]*s[1],s[2]).T,tmp.reshape(-1,s[2]))
              
             #K Construction: O(pN^2Naux) using orbital matrix
-            if Zconstruction == 1:    
+            if Zconstruction:    
                 stime = time.time()
                 Z1 = np.dot(Qpq.reshape(s[0]*s[1],s[2]),Cocc).reshape(s[0],s[1],-1)
                 ztime += (time.time() - stime)   
@@ -134,10 +136,10 @@ while SCFE_old - SCFE > conv_tol:
                 ztime += (time.time() - stime)
                 K = np.dot(Z_1.reshape(-1, s[1]).T, Z_1.reshape(-1, s[1])).reshape(s[1], s[1])
             
-
+    
     F = H + 2*J - K 
     #Compute Energy
-    Eelec = num.einsum('qr,qr->',F + H,D)
+    Eelec = np.einsum('qr,qr->',F + H,D)
     Enuc = mol.nuclear_repulsion_energy()
     SCFE_old = SCFE
     SCFE = Eelec + Enuc
@@ -147,7 +149,7 @@ while SCFE_old - SCFE > conv_tol:
         trials.append(F)
 
         #Obtain DIIS error
-        r = num.dot(A.T,(num.dot(F,D).dot(S)-num.dot(S,D).dot(F))).dot(A)    
+        r = np.dot(A.T,(np.dot(F,D).dot(S)-np.dot(S,D).dot(F))).dot(A)    
         if len(errors) > DIIS_size: #only keep the DIIS_size most recent guesses for use.
             del errors[0]
             del trials[0]
@@ -155,28 +157,28 @@ while SCFE_old - SCFE > conv_tol:
         
         #Build B
         size = len(errors)+1
-        B = num.zeros((size,size))
+        B = np.zeros((size,size))
         B[-1] = -1
         B[:,-1] = -1
         B[-1,-1] = 0
         for i in range(size-1):
             for j in range(size-1):
-                B[i,j] = num.sum(errors[i]*errors[j])
+                B[i,j] = np.sum(errors[i]*errors[j])
     
         #Solve for Cn
-        vec = num.zeros(size)
+        vec = np.zeros(size)
         vec[-1] = -1
-        inverse = num.linalg.inv(B)
-        Cn = num.linalg.solve(B,vec)
+        inverse = np.linalg.inv(B)
+        Cn = np.linalg.solve(B,vec)
                 
         #Rebuild Fock Matrix according to Cn
-        F = num.zeros_like(H)
+        F = np.zeros_like(H)
         for i in range(len(Cn)-1):
             F += Cn[i]*trials[i]
     
     #Diagonalize F and Reproduce Density Matrix
-    Fp = num.dot(A.T,F).dot(A)
-    eigval, eigvec = num.linalg.eigh(Fp)
+    Fp = np.dot(A.T,F).dot(A)
+    eigval, eigvec = np.linalg.eigh(Fp)
     C = np.dot(A,eigvec)
     Cocc = C[:,:ndocc]
     D = np.einsum('pi,qi->pq',Cocc,Cocc)
@@ -186,7 +188,8 @@ while SCFE_old - SCFE > conv_tol:
 print ("Total time in iterations: %6.3f" % (time.time() - itstart))
 print ("\nDIIS: %s  \nDF: %s  \nBLAS: %s " % (DIIS ,DF ,BLAS))
 print ("Number of iterations: %d" % count)
-print ("Total time building Zeta: %6.6f\n" % ztime)    
+if BLAS:
+    print ("Total time building Zeta: %6.6f\n" % ztime)    
 print ("SCF Energy: %12.10f" % SCFE)
 print ("Runtime:      %6.6f\n" % (time.time() - start))
 start = time.time()
