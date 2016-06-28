@@ -1,4 +1,7 @@
 import numpy as np
+import math
+import scipy.linalg.blas as blas
+import scipy.linalg as spl
 import time
 np.set_printoptions(precision=5, linewidth=150, suppress=True)
 
@@ -9,6 +12,7 @@ memory 12 GB
 numpy_memory = 12
 
 molecule mol {
+0 1
 O
 H 1 1.1
 H 1 1.1 2 104
@@ -16,131 +20,152 @@ symmetry c1
 }
 
 set {
-basis aug-cc-pVQZ
-df_basis_scf cc-pVQZ-jkfit
-e_convergence 1e-8
+    scf_type        df
+    basis           aug-cc-pVDZ
+    guess           core
+    maxiter         20
+    e_convergence   1e-10
+    d_convergence   1e-10
 }
 
-# Set defaults
-MAX_ITER = 20
-E_conv = 1.0E-8 # Energy convergence threshold
-D_conv = 1.0E-3 # dRMS convergence threshold
+# SCF Options: DIIS, SOSCF, JK Algorithm
+jk_algorithm = 'loop_BLAS'
+soscf = True
 
-# SCF Options
-diis_max_vecs = 10
-diis_start = 1
-df_rhf=True
-MMult = 'BLAS'
-Z_build = 'direct'
-
-# Generate integrals
+# Get wfn, initialize MintsHelper
 wfn = psi4.new_wavefunction(mol, psi4.get_global_option('BASIS'))
-t_0 = time.time()
+t_core = time.time()
 mints = psi4.MintsHelper(wfn.basisset())
 
-# Get overlap, nbf, ndocc for closed shell molecules
+# Build overlap and core Hamiltonian 
 S = np.asarray(mints.ao_overlap())
-nbf = S.shape[0]
-ndocc = wfn.nalpha()
-
-print('\nNumber of basis functions: %d' % nbf)
-print('Number of occupied orbitals: %d' % ndocc)
-
-# Perform memory checks
-eri_size = ((nbf ** 4) * 8) / 1.e9
-print('\nSize of ERI tensor will be %4.2f GB.' % eri_size)
-
-mem_estimate = eri_size  * 1.5
-if mem_estimate > numpy_memory:
-    clean()
-    raise Exception('Estimated memory utilization of ERI tensor (%4.2f GB) exceeds \
-                    numpy_memory limit of %4.2f GB.' % (mem_estimate, numpy_memory))
-
-# Build core Hamiltonian and ERI tensor
 T = np.asarray(mints.ao_kinetic())
 V = np.asarray(mints.ao_potential())
 H = T + V
 
-if df_rhf:
-    # Build DF tensor (P|rs) = [J^-.5]_PQ*(Q|rs)
-    print('Computing approximate integrals using density fitting...')
-    scf_e, scf_wfn = energy('SCF', return_wfn=True)
-    dfobj = DFTensor(scf_wfn, "DF_BASIS_SCF")
-    Qpq = np.asarray(dfobj.Qso())
-    if MMult == 'BLAS':
-        nQ, norb, nocc = Qpq.shape
+print('Time for core build: %1.3f seconds' % (time.time() - t_core))
+
+nbf = S.shape[0]
+ndocc = wfn.nalpha()
+nvirt = nbf - ndocc
+
+print('\nNumber of basis functions: %d' % nbf)
+print('Number of occupied orbitals: %d' % ndocc)
+
+# Two electron integrals
+t_ints = time.time()
+if jk_algorithm in ['einsum', 'BLAS', 'loop_BLAS']:
+    
+    # System Memory Checks
+    eri_size = ((nbf ** 4) * 16) / 1.e9
+    print('\nSize of ERI tensor will be %4.2f GB.' % eri_size)
+    mem_estimate = eri_size  * 1.5
+    if mem_estimate > numpy_memory:
+        clean()
+        raise Exception('ERI tensor too large to fit in system memory!')
+    print('ERI algorithm: %s' % psi4.get_global_option('SCF_TYPE'))
+    
+    if (psi4.get_global_option('SCF_TYPE') == 'DF'):
+        print('Computing approximate integrals using density fitting...')
+        # Build DF tensor (P|rs) = [J^-.5]_PQ*(Q|rs) the hard way
+        aux = psi4.BasisSet.pyconstruct_auxiliary(wfn.molecule(), 'DF_BASIS_SCF', '', 
+                                                  'JKFIT', psi4.get_global_option('BASIS'))
+        zeroC = psi4.Matrix(nbf, nbf)
+        dfobj = DFTensor(wfn.basisset(), aux, zeroC, ndocc, nvirt)
+        Qpq = np.asarray(dfobj.Qso())
+        if jk_algorithm == 'BLAS' or jk_algorithm == 'loop_BLAS':
+            nQ, norb, nocc = Qpq.shape
+    else:
+        print('Computing integrals...')
+        I = np.asarray(mints.ao_eri())
+        if jk_algorithm == 'BLAS' or jk_algorithm == 'loop_BLAS':
+            nI = I.shape[0]
+    
+    print ('SCF Type: %s' % jk_algorithm)
+
+elif jk_algoritm == 'Psi4':
+    # Memory and ERI's handled by Psi4
+    print('SCF Type: Psi4')
+
 else:
-    print('Computing integrals...')
-    set scf_type pk # For eventual comparison to Psi4
-    I = np.asarray(mints.ao_eri())
-    if MMult == 'BLAS':
-        nI = I.shape[0]
+    raise Exception("Not a recognized JK algorithm.  Please choose \
+                     from among `einsum', `BLAS', `loop_BLAS', and `Psi4'.")
+    
 
-print('Time taken for integrals: %1.3f seconds.' % (time.time() - t_0))
-t_1 = time.time()
+print('Time taken for integrals: %1.3f seconds.' % (time.time() - t_ints))
+t_setup = time.time()
 
-# Build A = S^(-1/2)
+# Compute initial guess
+if psi4.get_global_option('GUESS') == 'GWH':
+    dH = np.diag(H)
+    F0 = 0.875 * S * (dH + dH[:, None])
+    F0[np.diag_indices_from(H)] = dH
+    print 'Guess: GWH'
+    iter_type = 'GWH'
+else:
+    F0 = np.copy(H)
+    print 'Guess: CORE'
+    iter_type = 'CORE'
+
+# Orthogonalize Fock matrix
 A = mints.ao_overlap()
 A.power(-0.5, 1.e-14)
 A = np.asarray(A)
 
-# Compute initial core guess
-H_p = A.dot(H).dot(A)
-eigvals_H_p, C2 = np.linalg.eigh(H_p)
-C = A.dot(C2)
-C_occ = C[:, :ndocc]
-
-# Build 1PDM, check for correct MMult assignment
-if MMult == 'BLAS':
+def diag_F(F, ndocc):
+    F_p = A.dot(F).dot(A)
+    eigvals_F_p, C2 = np.linalg.eigh(F_p)
+    C = A.dot(C2)
+    C_occ = C[:, :ndocc].copy()
     D = np.dot(C_occ, C_occ.T)
-elif MMult == 'einsum':
-    D = np.einsum('pi,qi->pq', C_occ, C_occ)
-else:
-    raise Exception("Not a recognized tensor multiplication scheme.  Please choose \
-                           between `BLAS' and `einsum'.")
+    return C, C_occ, D
 
-print('\nTotal setup time: %1.3f seconds' % (time.time() - t_1))
+C, C_occ, D = diag_F(F0, ndocc)
 
+print('\nTotal setup time: %1.3f seconds' % (time.time() - t_setup))
 print('\nStarting RHF-SCF Iterations:\n')
 
-t_2 = time.time()
-E_old = 0.0
+# Nuclear repulsion energy
 E_nuc = mol.nuclear_repulsion_energy()
+
+# DIIS Setup
+F_list = []
+DIIS_r_list = []
+E_old = 0.0
 dE = 1
 
-F_list = []
-DIIS_err_list = []
+# JK algorithm-specific setup
+if (jk_algorithm == 'BLAS'):
+    if (psi4.get_global_option('SCF_TYPE') == 'DF'):
+        zeta1 = np.zeros((nQ * norb, ndocc))
+        zeta2 = np.zeros_like(zeta1)
+        Z_1 = np.zeros((nQ * ndocc, norb))
+        Z_2 = np.zeros_like(Z_1)
 
-for SCF_ITER in xrange(1, MAX_ITER + 1):
-    if df_rhf:
-        if MMult == 'BLAS':
-            # Build J @ O(N^2 Naux)
-            ## Contract 'Qpq,pq->Q' with GEMV compound indices ij,j->i
-            X_p = np.dot(Qpq.reshape(nQ, norb * norb), D.reshape(norb * norb))
-            ## Contract 'Qpq,Q->pq' with GEMV compound indices i,ij->j
-            J = np.dot(Qpq.reshape(nQ, norb * norb).T, X_p).reshape(norb, norb)
-            # Build K @ O(pN^2 Naux)
-            ## Build intermediate matrix Z
-            if Z_build == 'TTT':
-                z_1 = np.dot(C_occ.T, Qpq.reshape(nQ * norb, norb).T).T.reshape(nQ, norb, ndocc)
-            elif Z_build == 'direct':
-                z_1 = np.dot(Qpq.reshape(nQ * norb, norb), C_occ).reshape(nQ, norb, ndocc)
-            else:
-                raise Exception("Not a recognized Z matrix build option. Please choose triple-\
-                                transpose (`TTT') or direct (`direct').")
-            Z_1 = z_1.swapaxes(1,2).reshape(nQ * ndocc, norb)
-            if np.allclose(C_occ, C_occ):
-                # C_ij = C_ik
-                K = np.dot(Z_1.T, Z_1)
-            else:
-                # C_ij != C_ik
-                z_2 = np.dot(Qpq.reshape(nQ * norb, nocc), C_occ.T).reshape(nQ, norb, ndocc)
-                Z_2 = z_2.swapaxes(1,2).reshape(nQ * ndocc, norb)
-                K = np.dot(Z_1.T, Z_2)
-        elif MMult == 'einsum':
+if (jk_algorithm == 'Psi4'):
+    jk = psi4.JK.build_JK(wfn.basisset())
+    jk.initialize()
+    psiC = psi4.Matrix(C_occ.shape[0], C_occ.shape[1])
+    jk.C_left().apped(psiC)
+
+    np_viewC = np.asarray(psiC)
+
+jk_time = 0.0
+diis_time = 0.0
+t_scf = time.time()
+
+# Begin SCF Iteration
+for SCF_ITER in xrange(1, psi4.get_global_option('MAXITER') + 1):
+    
+    # Build JK object
+    t_jk = time.time()
+    if (psi4.get_global_option('SCF_TYPE') == 'DF'):
+
+        if jk_algorithm == 'einsum':
             # Build J @ O(N^2 Naux)
             X_p = np.einsum('Qpq,pq->Q', Qpq, D)
             J = np.einsum('Qpq,Q->pq', Qpq, X_p)        
+            
             # Build K @ O(pN^2 Naux)
             Z_1 = np.einsum('Qrs,sq->Qrq', Qpq, C_occ)
             if np.allclose(C_occ, C_occ):
@@ -150,51 +175,139 @@ for SCF_ITER in xrange(1, MAX_ITER + 1):
                 # C_ij != Cik
                 Z_2 = np.einsum('Qrs,ps->Qrp', Qpq, C_occ)
                 K = np.einsum('Qpq,Qrq->pr', Z_1, Z_2)
+
+        elif jk_algorithm == 'BLAS':
+            # Build J @ O(N^2 Naux)
+            X_p = np.dot(Qpq.reshape(nQ, norb * norb), D.ravel())
+            J = np.dot(Qpq.reshape(nQ, norb * norb).T, X_p).reshape(D.shape)
+        
+            # Build K @ O(pN^2 Naux)
+            ## Build intermediate matrix Z
+            zeta1.shape = (nQ * norb, ndocc)
+            np.dot(Qpq.reshape(nQ * norb, norb), C_occ, out=zeta1)
+            zeta1.shape = (nQ, norb, ndocc)
+            Z_1 = zeta1.swapaxes(1,2).reshape(nQ * ndocc, norb)
+            if np.allclose(C_occ, C_occ):
+                # C_ij = C_ik
+                K = np.dot(Z_1.T, Z_1)
+            # TODO: Rewrite the following with pre-allocated arrays
+            else:
+                # C_ij != C_ik
+                zeta2 = np.dot(Qpq.reshape(nQ * norb, nocc), C_occ.T).reshape(nQ, norb, ndocc)
+                Z_2 = z_2.swapaxes(1,2).reshape(nQ * ndocc, norb)
+                K = np.dot(Z_1.T, Z_2)
+
+        elif (jk_algorithm == 'loop_BLAS'):
+            # Build J @ O(N^2 Naux)
+            X_p = np.dot(Qpq.reshape(nQ, norb * norb), D.ravel())
+            J = np.dot(Qpq.reshape(nQ, norb * norb).T, X_p).reshape(D.shape)
+        
+            # Build K
+            K = np.zeros_like(J)
+            tmp = np.zeros((norb, ndocc))
+            for q in xrange(nQ):
+                blas.dgemm(1.0, C_occ.T, Qpq[q].T, beta=0.0, c=tmp.T, trans_a=False,
+                           trans_b=False, overwrite_c=True)
+                blas.dgemm(1.0, tmp.T, tmp.T, beta=1.0, c=K.T, trans_a=True,
+                           trans_b=False, overwrite_c=True)
+            
+            K = K.T
+        
+        elif (jk_algorithm == 'Psi4'):
+            np.viewC[:] = C_occ
+            jk.compute()
+
+            J = np.asarray(jk.J()[0])
+            K = np.asarray(jk.K()[0])
+
     else:
-        if MMult == 'BLAS':
+        if jk_algorithm == 'BLAS':
             J = np.dot(I.reshape(nI**2, nI**2), D.reshape(nI**2)).reshape(nI, nI)
             K = np.dot(I.swapaxes(1, 2).reshape(nI**2, nI**2), D.reshape(nI**2)).reshape(nI, nI)
-        elif MMult == 'einsum':
+        elif jk_algorithm == 'einsum':
             J = np.einsum('pqrs,rs->pq', I, D)
             K = np.einsum('prqs,rs->pq', I, D)
-    
+   
+    jk_time += time.time() - t_jk
+ 
     # Build F
     F = H + 2*J - K
 
-    # Build DIIS error matrix
-    diis_err = A.T.dot(F.dot(D).dot(S) - S.dot(D).dot(F)).dot(A)
+    # Build DIIS error matrix & gradient
+    diis_r = A.T.dot(F.dot(D).dot(S) - S.dot(D).dot(F)).dot(A)
+    grad = (F.dot(D).dot(S) - S.dot(D).dot(F))
 
     # Compute energies
     E_elec = np.einsum('pq,pq->', H + F, D)
     SCF_E = E_elec + E_nuc
     dE = SCF_E - E_old
-    dRMS = np.mean(diis_err ** 2) ** 0.5 # Root mean square of the maximum diis error
+    dRMS = np.mean(diis_r ** 2) ** 0.5 # Root mean square of the maximum diis error
 
-    print('RHF Iteration %3d: Energy = %4.16f   dE = % 1.5E   dRMS = %1.5E' 
-    % (SCF_ITER, SCF_E, dE, dRMS)),
-    if SCF_ITER > diis_start:
-        print('  DIIS')
-    else:
-        print    
+    print('RHF Iteration %2d: E = %4.16f   dE = % 2.5E   dRMS = %1.5E   %s' 
+    % (SCF_ITER, SCF_E, dE, dRMS, iter_type))
 
-    if (abs(dE) < E_conv) and (dRMS < D_conv):
-        break    
-
-    # Update iteratives
     E_old = SCF_E
 
-    # DIIS Procedure
-    if SCF_ITER >= diis_start:
+    if (
+        abs(dE) < psi4.get_global_option('E_CONVERGENCE') and 
+        abs(dRMS) < psi4.get_global_option('D_CONVERGENCE')
+       ):
+        print ('SCF CONVERGED\n')
+        break    
+
+    # SCF Options: DIIS & SOSCF
+    if (soscf and (dRMS < 1.e-2)):
+
+        if eri_size > 8:
+            raise Exception("Exact SOSCF requires 2 * N^4 memory, this currently exceeds 8GB")
+
+        grad = -4 * np.dot(C.T, F).dot(C)[:ndocc, ndocc:]
+        F_mo = np.einsum('ij,jk,kl->il', C.T, F, C)
         
+        # Build G (exact integrals)
+        Q_mo = np.einsum('Qpq, pi, qj -> Qij', Qpq, C, C)
+        I_mo = np.einsum('Qpq, Qrs -> pqrs', Q_mo, Q_mo)
+            
+        # Build Hessian
+        delta = np.diag(np.ones(norb))
+        Hess = np.einsum('np,mi->mnip', F_mo, delta)
+        Hess -= np.einsum('mi,np->mnip', F_mo, delta)
+        Hess += 4.0 * I_mo
+        Hess -= np.einsum('mpin->mnip', I_mo)
+        Hess -= np.einsum('npim->mnip', I_mo)
+        Hess = Hess[:ndocc, ndocc:, :ndocc, ndocc:]
+        Hess *= 4
+
+        nrot = ndocc * nvirt
+
+        # Solve for kappa
+        k = np.linalg.solve(Hess.reshape(nrot, nrot), -grad.ravel())
+        k.shape = (ndocc, nvirt)
+
+        # Build full kappa matrix
+        full_k = np.zeros((norb, norb))
+        full_k[:ndocc, ndocc:] = k
+        full_k[ndocc:, :ndocc] = -k.T
+
+        # Construct U and rotated orbitals
+        U = spl.expm(full_k)
+        C = np.dot(C, U)
+
+        # Update matrices
+        C_occ = C[:, :ndocc].copy()
+        D = np.dot(C_occ, C_occ.T)
+        iter_type = 'SOSCF'
+
+    elif (SCF_ITER >= psi4.get_global_option('DIIS_START')):
         # Append Fock matrix and error vector to lists
         F_list.append(F)
-        DIIS_err_list.append(diis_err)
+        DIIS_r_list.append(diis_r)
         
         # Check length of Fock list, pop first element if too long
-        if len(F_list) > diis_max_vecs:
+        if (len(F_list) > psi4.get_global_option('DIIS_MAX_VECS')):
             del F_list[0]
-            del DIIS_err_list[0]
-            
+            del DIIS_r_list[0]
+        
         # Build error vector inner product matrix, B
         b_len = len(F_list) + 1 # B is (NxN + 1) square; N = # previous F guesses
         B = np.zeros((b_len, b_len))
@@ -203,7 +316,7 @@ for SCF_ITER in xrange(1, MAX_ITER + 1):
         B[-1, -1] = 0 # Make bottom right element 0
         for i in  xrange(b_len - 1):
             for j in xrange(i, b_len - 1):
-                B[i, j] = B[j, i]  = np.sum(DIIS_err_list[i] * DIIS_err_list[j]) # B symmetric
+                B[i, j] = B[j, i]  = np.sum(DIIS_r_list[i] * DIIS_r_list[j]) # B symmetric
 
         # Build RHS of Lagrange multiplier matrix equation
         rhs = np.zeros((b_len))
@@ -217,26 +330,23 @@ for SCF_ITER in xrange(1, MAX_ITER + 1):
         for c in xrange(resi_coeff.shape[0] - 1):
             F_diis += resi_coeff[c] * F_list[c]
         
-        # Orthogonalize F_diis
-        F_p = A.dot(F_diis).dot(A)
+        # Orthogonalize DIIS Fock matrix
+        C, C_occ, D = diag_F(F_diis, ndocc)
 
+        iter_type = 'DIIS'        
+    
     else:
-        # Orthogonalize F
-        F_p = A.dot(F).dot(A)
+        # Orthonormalize Fock matrix
+        C, C_occ, D = diag_F(F, ndocc)
+        iter_type = 'DIAG'
 
-    # Diagonalize F_p to find occupied orbitals
-    eigvals_F_p, C2 = np.linalg.eigh(F_p)
-    C = A.dot(C2)
-    C_occ = C[:, :ndocc]
-    D = np.einsum('pi,qi->pq', C_occ, C_occ)
-
-    if SCF_ITER == MAX_ITER:
+    if SCF_ITER == psi4.get_global_option('MAXITER'):
         clean()
         raise Exception('\nMaximum number of SCF iterations exceeded.')
 
-print('\nTotal time for SCF iterations: %1.3f seconds\n' % (time.time() - t_2))
+print('\nTotal time for SCF iterations: %1.3f seconds\n' % (time.time() - t_scf))
 print('Final SCF energy: %.8f hartree' % SCF_E)
-print('Total time for SCF: %1.3f seconds' % (time.time() - t_0))
+print('Total time for SCF: %1.3f seconds' % (time.time() - t_core))
 t_psi = time.time()
 SCF_E_psi = energy('SCF')
 print('Total time for Psi4: %1.3f seconds' % (time.time() - t_psi))
