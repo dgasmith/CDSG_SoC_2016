@@ -24,7 +24,7 @@ class JK_Builder:
 
             D_ = np.dot(Cleft, Cleft.T)
 
-        elif np.allclose(Cleft, Cright) == 0: #Cij != Cik
+        elif not np.allclose(Cleft, Cright): #Cij != Cik
             left = np.shape(Cleft)
             right = np.shape(Cright)
 

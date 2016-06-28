@@ -32,7 +32,7 @@ set {
 wfn = psi4.new_wavefunction(mol, psi4.get_global_option('BASIS'))
 
 # Epack(wfn, SCF_dE_tol, SCF_dRMS_tol, iter_tol, SOSCF_dRMS_tol, SOSCF_iter_tol)
-Hopefully = Epack(wfn, 1e-11, 1e-10, 100, 5e-3, 25)
+Hopefully = Epack(wfn, 1e-11, 1e-10, 100, 8, 5e-3, 25)
 Hopefully.energy('MP2')
 
 

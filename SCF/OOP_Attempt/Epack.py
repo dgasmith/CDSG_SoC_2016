@@ -1,18 +1,20 @@
 #SCF Class definitions
+import psi4
 import time
 import numpy as np
-import psi4
 import scipy.linalg as sl
 from JK_Builder import JK_Builder
+from DIIS import DIIS
 
 class Epack:
     
-    def __init__(self, wfn, dE_tol, dRMS_tol, maxmacro, SOSCF_tol, maxmicro):#param for SCF iterations, energy types specified below.
+    def __init__(self, wfn, dE_tol, dRMS_tol, maxmacro, DIIS_size, SOSCF_tol, maxmicro):#param for SCF iterations, energy types specified below.
         self.psi4 = psi4
         self.wfn = wfn
         self.dE_tol = dE_tol
         self.maxmacro = maxmacro
         self.dRMS_tol = dRMS_tol
+        self.DIIS_size = DIIS_size
         self.SOSCF_tol = SOSCF_tol
         self.maxmicro = maxmicro  #microtime as member data rather than soscf return
 
@@ -23,6 +25,7 @@ class Epack:
         self.H = self.T + self.V
         del self.T, self.V, self.Mints
  
+        self.DIIS_ = DIIS(self.DIIS_size)
         self.JK = JK_Builder() #JK_Builder probably isn't necceary as a class right now since it has one function and no member data.
         self.Enuc = self.wfn.molecule().nuclear_repulsion_energy()
         self.ndocc = self.wfn.nalpha()
@@ -40,40 +43,7 @@ class Epack:
         D = np.einsum('pi,qi->pq',Cocc,Cocc)
         return C, Cocc, Cvirt, D
     
-    def DIIS(self, trials, errors, F, r): #trials and errors are kept within the energy() scope rather than class member data
 
-        trials.append(F)
-
-        #Obtain DIIS error    
-        if len(errors) > 8: #only keep the 8th most recent guesses for use.
-            del errors[0]
-            del trials[0]
-        errors.append(r)
-
-        #Build B
-        size = len(errors) + 1
-        B = np.zeros((size, size))
-        B[-1] = -1
-        B[:,-1] = -1
-        B[-1,-1] = 0
-        for i in range(size-1):
-            for j in range(size-1):
-                B[i,j] = np.sum(errors[i] * errors[j])
-
-        #Solve for Cn
-        vec = np.zeros(size)
-        vec[-1] = -1
-        inverse = np.linalg.inv(B)
-        Cn = np.linalg.solve(B, vec)
-
-        #Rebuild Fock Matrix according to Cn
-        F = np.zeros_like(F)
-        for i in range(len(Cn) - 1):
-            F += Cn[i] * trials[i]
-
-        return F
-        #Diagonalize F and Reproduce Density Matrix after!!
-    
     def SOSCF(self, C, F, Qpq, ndocc, nvirt):
         # Remember only the OV part is needed.
         grad = -4 * np.dot(C.T, F).dot(C)[:ndocc, ndocc:]
@@ -81,35 +51,31 @@ class Epack:
                    
         eps = np.diag(Fmo)
         precon = -4 * (eps[:ndocc][:, None] - eps[ndocc:])
-        
         k = -grad / precon
-        p = []
-        rk = []
-        z = []
         
         Cocc = C[:,:ndocc] 
         Cvirt = C[:,ndocc:]
         Ax = self.build_Ax(Fmo, Cocc, k, Cvirt, Qpq).ravel() #Build DF Hessian
         
         k = k.ravel()
-        rk.append(-grad.ravel() - Ax)
-        z.append(rk[0]/precon.ravel())
-        p.append(z[0])
+        rk = -grad.ravel() - Ax
+        zk = rk / precon.ravel()
+        p = zk
 
         grad_rms = np.mean( grad ** 2) ** 0.5 #Relative metric
         microstart = time.time()
 
         for j in range(self.maxmicro):
 
-            tmp = self.build_Ax(Fmo, Cocc, p[j].reshape(ndocc, nvirt), Cvirt, Qpq).ravel()                   
+            tmp = self.build_Ax(Fmo, Cocc, p.reshape(ndocc, nvirt), Cvirt, Qpq).ravel()                   
 
-            alpha = np.dot(rk[j].T, z[j])
-            alpha /= np.dot(p[j].T, tmp)
+            alpha = np.dot(rk.T, zk)
+            alpha /= np.dot(p.T, tmp)
              
-            k = k + alpha*p[j]
-            rk.append(rk[j] - alpha*tmp)
+            k = k + alpha*p
+            rk1 = rk - alpha*tmp
              
-            err = np.mean(rk[j+1]**2)**0.5
+            err = np.mean(rk1**2)**0.5
             err = err / grad_rms
             print ("SOSCF Microiteration %d: RMS = %2.5E" % (j+1, err))
             self.totmicro += 1 
@@ -122,9 +88,12 @@ class Epack:
                     soscf = True
                 break
 
-            z.append(rk[j+1]/precon.ravel())
-            beta = np.dot(z[j+1].T, rk[j+1]) / np.dot(z[j].T,rk[j])
-            p.append(z[j+1] + beta*p[j])
+            zk1 = rk1 / precon.ravel()
+            beta = np.dot(zk1.T, rk1) / np.dot(zk.T,rk)
+            p = zk1 + beta*p
+            
+            zk = zk1
+            rk = rk1
 
         self.microtime += (time.time() - microstart)
         # Convert back, mind the compound indices
@@ -192,10 +161,6 @@ class Epack:
         Iter_type = "CORE"
         SOSCF = True
 
-        #Initiate set of trial vectors, error vectors.
-        trials = []
-        errors = []
-
         print ("Total time taken for setup: %6.6f" % (time.time() - start))
         itstart = time.time()
 
@@ -231,7 +196,7 @@ class Epack:
                 Iter_type = 'SOSCF'
 
             else: #Use DIIS
-                F = self.DIIS(trials, errors, F, r)
+                F = self.DIIS_.next_trial(F, r)
                 C, Cocc, Cvirt, D = self.diagonalize(F, A)
                 Iter_type = 'DIIS'
         
@@ -280,5 +245,4 @@ class Epack:
   
             print ("MP2 Energy Adjustment: %6.6f" % tot)
             print ("MP2 Energy: %12.10f" % (SCFE + tot))
-            print ("MP2 Runtime: %6.6f\n" % (SCF_time + MP2_time))
-    
+            print ("MP2 Runtime: %6.6f\n" % (SCF_time + MP2_time))    
