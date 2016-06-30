@@ -1,0 +1,42 @@
+#Testing the OOP code 
+from Epack import Epack #imports a classobj from a module
+
+molecule mol {
+    O
+    H 1 1.1
+    H 1 1.1 2 104
+
+    #C    1.39410    0.00000   0.00000
+    #C    0.69705   -1.20732   0.00000
+    #C   -0.69705   -1.20732   0.00000
+    #C   -1.39410    0.00000   0.00000
+    #C   -0.69705    1.20732   0.00000
+    #C    0.69705    1.20732   0.00000
+    #H    2.47618    0.00000   0.00000
+    #H    1.23809   -2.14444   0.00000
+    #H   -1.23809   -2.14444   0.00000
+    #H   -2.47618    0.00000   0.00000
+    #H   -1.23809    2.14444   0.00000
+    #H    1.23809    2.14444   0.00000
+
+    symmetry c1
+}
+
+set {
+    scf_type df
+    basis cc-PVDZ
+    mp2_type df
+}
+#Edit molecule and set basis in input.dat, create wavefunction and pass it
+# to Epack (classobj) to create instance.  Let the Epack instance do the rest
+wfn = psi4.new_wavefunction(mol, psi4.get_global_option('BASIS'))
+
+# Epack(wfn, SCF_dE_tol, SCF_dRMS_tol, iter_tol, SOSCF_dRMS_tol, SOSCF_iter_tol)
+Hopefully = Epack(wfn, 1e-11, 1e-10, 100, 8, 5e-3, 25)
+Hopefully.energy('MP2')
+
+
+import time
+start = time.time()
+print("Psi4 energy: %12.10f" % energy('MP2')) 
+print("Psi4 runtime: %6.6f" % (time.time() - start))    
